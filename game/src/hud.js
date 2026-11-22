@@ -1,4 +1,5 @@
-// Solmaris Heat — HUD: bars, stars, cash, objective, minimap, full city map, toasts.
+// Solmaris Heat — HUD: bars, wanted stars (blinking while the police search),
+// cash, weapon, objective, event feed, circular minimap, full city map, toasts.
 import { TILE, GRID, WORLD } from './config.js';
 import { TILE_KIND, zoneName } from './city.js';
 
@@ -10,7 +11,9 @@ export function createHud() {
   const weaponEl = el('hud-weapon');
   const healthFill = el('hud-health-fill');
   const armorFill = el('hud-armor-fill');
+  const staminaFill = el('hud-stamina-fill');
   const clockEl = el('hud-clock');
+  const weatherEl = el('hud-weather');
   const objectiveEl = el('hud-objective');
   const messageEl = el('hud-message');
   const feedEl = el('hud-feed');
@@ -62,18 +65,25 @@ export function createHud() {
 
     update(G, dt) {
       const p = G.player;
-      // Stars
+      // Stars: solid while hunted, blinking while the police are searching.
+      const blink = G.police.searching && Math.floor(G.time * 2.4) % 2 === 0;
       let s = '';
-      for (let i = 0; i < 5; i++) s += i < G.police.stars ? '★' : '<span class="off">★</span>';
+      for (let i = 0; i < 5; i++) {
+        const on = i < G.police.stars && !blink;
+        s += on ? '★' : '<span class="off">★</span>';
+      }
       starsEl.innerHTML = s;
       cashEl.textContent = '$' + Math.floor(p.cash).toLocaleString('en-US');
-      weaponEl.textContent = p.weapon === 'pistol' ? `Pistol · ${p.ammo}` : 'Fists';
+      weaponEl.textContent = p.weapon === 'pistol' ? `Pistol · ${p.ammo}`
+        : p.weapon === 'scattergun' ? `Scattergun · ${p.ammo}` : 'Fists';
       healthFill.style.width = Math.max(0, p.health) + '%';
       armorFill.style.width = Math.max(0, p.armor) + '%';
+      if (staminaFill) staminaFill.style.width = Math.round(p.stamina * 100) + '%';
 
       const hours = Math.floor(G.dayTime * 24);
       const mins = Math.floor((G.dayTime * 24 - hours) * 60);
       clockEl.textContent = `${String(hours).padStart(2, '0')}:${String(mins).padStart(2, '0')}`;
+      if (weatherEl) weatherEl.textContent = G.weather.isRaining() ? '☂ Rain' : '';
 
       const obj = G.missions.objective;
       if (obj) { objectiveEl.textContent = obj; objectiveEl.classList.remove('hidden'); }
@@ -129,7 +139,7 @@ export function createHud() {
         for (let tx = t0x; tx <= t1x; tx++) {
           if (tx < 0 || ty < 0 || tx >= GRID || ty >= GRID) continue;
           const k = city.tiles[ty][tx];
-          mctx.fillStyle = k === TILE_KIND.ROAD ? '#5a6470' : k === TILE_KIND.WATER ? '#2e7fb8' : k === TILE_KIND.SAND ? '#e3cd96' : k === TILE_KIND.PARK ? '#3f7d3a' : '#39434e';
+          mctx.fillStyle = k === TILE_KIND.ROAD ? '#5a6470' : k === TILE_KIND.WATER ? '#2e7fb8' : k === TILE_KIND.SAND ? '#e3cd96' : k === TILE_KIND.PARK ? '#3f7d3a' : k === TILE_KIND.LOT ? '#4a4238' : '#39434e';
           mctx.fillRect(R + (tx * TILE - p.x) * scale, R + (ty * TILE - p.y) * scale, TILE * scale + 1, TILE * scale + 1);
         }
       }
@@ -147,8 +157,12 @@ export function createHud() {
       blip(P.respray.x, P.respray.y, '#5ce08a', 4);
       blip(P.gunshop.x, P.gunshop.y, '#ffb43f', 4);
       blip(P.safehouse.x, P.safehouse.y, '#c8a2ff', 4);
+      blip(P.raceStart.x, P.raceStart.y, '#7de8ff', 4);
       for (const car of G.cars) if (car.isPolice && car.driver === 'police') blip(car.x, car.y, '#5c9dff', 4);
+      for (const ped of G.peds) if (ped.state === 'cop') blip(ped.x, ped.y, '#5c9dff', 3.5);
       for (const e of G.combat.enemies) if (e.state !== 'down') blip(e.x, e.y, '#ff5c5c', 3.5);
+      for (const s of G.police.spikes) blip(s.x, s.y, '#ffffff', 3);
+      if (G.air.heli) blip(G.air.heli.x, G.air.heli.y, '#9fd0ff', 5);
       const m = G.missions.marker;
       if (m) blip(m.x, m.y, '#ffd93f', 6);
       // Player arrow
@@ -176,7 +190,7 @@ export function createHud() {
       for (let ty = 0; ty < GRID; ty++) {
         for (let tx = 0; tx < GRID; tx++) {
           const k = city.tiles[ty][tx];
-          c.fillStyle = k === TILE_KIND.ROAD ? '#5a6470' : k === TILE_KIND.WATER ? '#2e7fb8' : k === TILE_KIND.SAND ? '#e3cd96' : k === TILE_KIND.PARK ? '#3f7d3a' : '#39434e';
+          c.fillStyle = k === TILE_KIND.ROAD ? '#5a6470' : k === TILE_KIND.WATER ? '#2e7fb8' : k === TILE_KIND.SAND ? '#e3cd96' : k === TILE_KIND.PARK ? '#3f7d3a' : k === TILE_KIND.LOT ? '#4a4238' : '#39434e';
           c.fillRect(tx * TILE * sx, ty * TILE * sy, TILE * sx + 1, TILE * sy + 1);
         }
       }
@@ -191,6 +205,8 @@ export function createHud() {
       dot(P.gunshop.x, P.gunshop.y, '#ffb43f', 5, 'Iron & Oak');
       dot(P.safehouse.x, P.safehouse.y, '#c8a2ff', 5, 'Safehouse');
       dot(P.clinic.x, P.clinic.y, '#ff8ab0', 5, 'Clinic');
+      dot(P.raceStart.x, P.raceStart.y, '#7de8ff', 5, 'Street race');
+      dot(P.ferry.x, P.ferry.y, '#9fd0ff', 5, 'Ferry pier');
       if (G.missions.marker) dot(G.missions.marker.x, G.missions.marker.y, '#ffd93f', 7);
       dot(G.player.x, G.player.y, '#ffffff', 6, 'You');
     },

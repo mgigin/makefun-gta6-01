@@ -1,5 +1,7 @@
-// Solmaris Heat — story missions for fixer Dario Quint, plus taxi fares and street races.
-// Mara Voss, ex-courier, runs jobs against the Ledger crew across the bay city of Solmaris.
+// Solmaris Heat — story missions for fixer Dario Quint, plus taxi fares and
+// street races. Mara Voss, ex-courier, runs jobs against the Ledger crew
+// across the bay city of Solmaris: deliveries, thefts, shootouts, races,
+// a repossession against the clock, and a final run to the ferry.
 import { makeCar } from './vehicles.js';
 import { TILE } from './config.js';
 
@@ -21,8 +23,16 @@ const STORY = [
     brief: 'Dario: "Courier race, old routes. Hit every checkpoint before the clock dies and the bay remembers your name."',
   },
   {
+    id: 'repo-job', title: 'Repo Job', reward: 550,
+    brief: 'Dario: "A Palm GT with a tracker, Palm Heights. The repo crew is coming for it too — beat the clock to Chop & Shine."',
+  },
+  {
     id: 'ledger-van', title: "The Ledger's Ledger", reward: 650,
     brief: 'Dario: "Their bookkeeper van rolls at dusk. Take it, bring it to the safehouse. Expect company."',
+  },
+  {
+    id: 'pier-pressure', title: 'Pier Pressure', reward: 800,
+    brief: 'Dario: "The Ledger is shaking down the pier vendors. Clear them out, Mara. All of them."',
   },
   {
     id: 'last-ferry', title: 'Last Ferry', reward: 1000,
@@ -37,8 +47,9 @@ export function createMissions() {
     marker: null,           // {x, y, kind}
     objective: '',
     timer: 0,
-    taxi: null,             // {fare, destX, destY, stage}
-    race: null,             // {checkpoints:[], next, timeLeft}
+    taxi: null,             // {fare, destX, destY, stage, timer}
+    race: null,             // {checkpoints:[], next, timeLeft} — story race
+    streetRace: null,       // repeatable side race, same shape
 
     storyDone() { return this.storyIndex >= STORY.length; },
     nextTitle() { return this.storyDone() ? null : STORY[this.storyIndex].title; },
@@ -61,7 +72,7 @@ export function createMissions() {
           break;
         case 'hot-wheels': {
           const car = makeCar(G.rng, 20 * TILE + 24, 11 * TILE + 24, 0, {
-            color: '#e06a2e', model: { name: 'Sunrunner Convertible', top: 440, accel: 365, grip: 6.8 },
+            color: '#e06a2e', model: { name: 'Sunrunner Convertible', kind: 'convertible', top: 442, accel: 366, grip: 6.8 },
           });
           car.missionCar = true;
           G.cars.push(car);
@@ -81,9 +92,21 @@ export function createMissions() {
           this.marker = { ...this.race.checkpoints[0], kind: 'race' };
           break;
         }
+        case 'repo-job': {
+          const car = makeCar(G.rng, 22 * TILE + 24, 7 * TILE + 24, Math.PI / 2, {
+            color: '#c8433c', model: { name: 'Palm GT', kind: 'coupe', top: 478, accel: 410, grip: 7.3 },
+          });
+          car.missionCar = true;
+          G.cars.push(car);
+          this.active.data.car = car;
+          this.active.data.timeLeft = 95;
+          this.objective = 'Repossess the red Palm GT in Palm Heights';
+          this.marker = { x: car.x, y: car.y, kind: 'job' };
+          break;
+        }
         case 'ledger-van': {
           const van = makeCar(G.rng, 16 * TILE + 24, 16 * TILE + 24, Math.PI, {
-            color: '#2f2f36', model: { name: 'Dockside Van', top: 330, accel: 270, grip: 5.2 },
+            color: '#2f2f36', model: { name: 'Dockside Van', kind: 'van', top: 332, accel: 272, grip: 5.2 },
           });
           van.missionCar = true;
           G.cars.push(van);
@@ -92,9 +115,13 @@ export function createMissions() {
           this.marker = { x: van.x, y: van.y, kind: 'job' };
           break;
         }
+        case 'pier-pressure':
+          this.objective = 'Clear the Ledger crew off the pier';
+          this.marker = { x: P.ferry.x, y: P.ferry.y, kind: 'job' };
+          break;
         case 'last-ferry': {
           const car = makeCar(G.rng, P.fixer.x + 60, P.fixer.y, 0, {
-            color: '#3c6dc8', model: { name: 'Bayside Coupe', top: 450, accel: 380, grip: 7.0 },
+            color: '#3c6dc8', model: { name: 'Bayside Coupe', kind: 'coupe', top: 452, accel: 384, grip: 7.0 },
           });
           car.missionCar = true;
           G.cars.push(car);
@@ -182,7 +209,9 @@ export function createMissions() {
           case 'dockside': {
             if (a.stage === 0 && near(this.marker.x, this.marker.y, 60)) {
               a.stage = 1;
-              for (let i = 0; i < 3; i++) G.combat.spawnEnemy(G, this.marker.x + (i - 1) * 46, this.marker.y - 30);
+              G.combat.spawnEnemy(G, this.marker.x - 46, this.marker.y - 30, 'shooter');
+              G.combat.spawnEnemy(G, this.marker.x + 46, this.marker.y - 30, 'shooter');
+              G.combat.spawnEnemy(G, this.marker.x, this.marker.y - 70, 'rusher');
               this.objective = 'Take down the Ledger crew (3)';
               this.marker = null;
             }
@@ -209,6 +238,25 @@ export function createMissions() {
             }
             break;
           }
+          case 'repo-job': {
+            const car = a.data.car;
+            if (a.stage === 0 && p.car === car) {
+              a.stage = 1;
+              G.police.addCrime(G, 'stealCar');
+              this.marker = { x: P.respray.x, y: P.respray.y, kind: 'job' };
+            }
+            if (a.stage === 1) {
+              a.data.timeLeft -= dt;
+              this.objective = `Deliver the Palm GT to Chop & Shine — tracker: ${Math.max(0, a.data.timeLeft).toFixed(0)}s`;
+              if (p.car === car && near(P.respray.x, P.respray.y, 56)) {
+                this.complete(G, `Tracker beaten with ${Math.max(0, a.data.timeLeft).toFixed(0)}s to spare`);
+              } else if (a.data.timeLeft <= 0) {
+                this.fail(G, 'The tracker pinged — the repo crew took it back');
+              }
+            }
+            if (car.dead) this.fail(G, 'The Palm GT was destroyed');
+            break;
+          }
           case 'ledger-van': {
             const van = a.data.car;
             if (a.stage === 0 && p.car === van) {
@@ -222,12 +270,29 @@ export function createMissions() {
             if (van.dead) this.fail(G, 'The van was destroyed');
             break;
           }
+          case 'pier-pressure': {
+            if (a.stage === 0 && near(this.marker.x, this.marker.y, 70)) {
+              a.stage = 1;
+              const spots = [[-70, -40], [70, -40], [-40, 30], [40, 30], [0, -90]];
+              spots.forEach(([dx, dy], i) => {
+                G.combat.spawnEnemy(G, this.marker.x + dx, this.marker.y + dy, i % 2 ? 'rusher' : 'shooter');
+              });
+              this.objective = 'Take down the Ledger crew (5)';
+              this.marker = null;
+            }
+            if (a.stage === 1) {
+              const left = G.combat.enemies.filter((e) => e.state !== 'down').length;
+              this.objective = `Take down the Ledger crew (${left} left)`;
+              if (left === 0) this.complete(G, 'The pier vendors send their thanks');
+            }
+            break;
+          }
           case 'last-ferry': {
             const car = a.data.car;
             if (a.stage === 0 && p.car === car) {
               a.stage = 1;
               this.objective = 'Drive Dario to the ferry at Solmaris Beach';
-              this.marker = { x: 12 * TILE + 24, y: 23 * TILE + 24, kind: 'job' };
+              this.marker = { x: P.ferry.x, y: P.ferry.y, kind: 'job' };
             }
             if (a.stage === 1) {
               a.data.waveTimer = (a.data.waveTimer || 0) - dt;
@@ -236,7 +301,7 @@ export function createMissions() {
                 a.data.waves++;
                 for (let i = 0; i < 2; i++) {
                   const ang = Math.random() * Math.PI * 2;
-                  G.combat.spawnEnemy(G, p.x + Math.cos(ang) * 320, p.y + Math.sin(ang) * 320);
+                  G.combat.spawnEnemy(G, p.x + Math.cos(ang) * 320, p.y + Math.sin(ang) * 320, i ? 'rusher' : 'shooter');
                 }
                 G.hud.feed('Ledger ambush!');
               }
@@ -249,12 +314,60 @@ export function createMissions() {
       }
 
       this.updateTaxi(G, dt);
+      this.updateStreetRace(G, dt);
+    },
+
+    // Street race side activity: drive to the meet in Palm Heights, then hit
+    // six checkpoints against the clock for cash. Repeatable.
+    updateStreetRace(G, dt) {
+      const p = G.player;
+      const P = G.city.places;
+      if (this.active || this.taxi) return;
+      if (!this.streetRace) {
+        if (p.mode === 'car' && Math.hypot(p.x - P.raceStart.x, p.y - P.raceStart.y) < 60) {
+          const cps = [[15, 20], [5, 20], [5, 10], [10, 5], [20, 5], [20, 15]];
+          this.streetRace = { checkpoints: cps.map(([tx, ty]) => ({ x: tx * TILE + 24, y: ty * TILE + 24 })), next: 0, timeLeft: 100 };
+          this.objective = 'Street race — hit every checkpoint!';
+          this.marker = { ...this.streetRace.checkpoints[0], kind: 'race' };
+          G.hud.feed('Street race started — $400 if you finish');
+          G.audio.missionStart();
+        }
+        return;
+      }
+      const r = this.streetRace;
+      r.timeLeft -= dt;
+      const cp = r.checkpoints[r.next];
+      this.objective = `Race checkpoint ${r.next + 1}/${r.checkpoints.length} — ${Math.max(0, r.timeLeft).toFixed(0)}s`;
+      if (cp && Math.hypot(p.x - cp.x, p.y - cp.y) < 62) {
+        r.next++;
+        r.timeLeft += 8;
+        G.audio.checkpoint();
+        if (r.next >= r.checkpoints.length) {
+          const pay = 400 + Math.floor(r.timeLeft) * 2;
+          p.cash += pay;
+          G.stats.racesWon = (G.stats.racesWon || 0) + 1;
+          G.hud.toast(`RACE WON +$${pay}`);
+          G.audio.missionPass();
+          this.streetRace = null;
+          this.objective = '';
+          this.marker = null;
+          return;
+        }
+        this.marker = { ...r.checkpoints[r.next], kind: 'race' };
+      }
+      if (r.timeLeft <= 0 || p.mode !== 'car') {
+        G.hud.feed('Street race lost');
+        G.audio.missionFail();
+        this.streetRace = null;
+        this.objective = '';
+        this.marker = null;
+      }
     },
 
     // Taxi side job: enter a Metro Taxi, pick up fares, deliver them for cash.
     updateTaxi(G, dt) {
       const p = G.player;
-      if (!this.taxi && p.mode === 'car' && p.car && p.car.isTaxi && !this.active) {
+      if (!this.taxi && p.mode === 'car' && p.car && p.car.isTaxi && !this.active && !this.streetRace) {
         const fare = G.peds.find((ped) => ped.state === 'walk');
         if (fare) {
           fare.state = 'taxi';

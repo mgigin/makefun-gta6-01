@@ -20,3 +20,14 @@ export function rngInt(rng, min, max) {
 export function rngPick(rng, arr) {
   return arr[Math.floor(rng() * arr.length)];
 }
+
+export function rngChance(rng, p) {
+  return rng() < p;
+}
+
+// Deterministic per-cell hash in [0,1): stable decoration choices without RNG state.
+export function cellHash(x, y) {
+  let h = (x * 374761393 + y * 668265263) | 0;
+  h = Math.imul(h ^ (h >>> 13), 1274126177);
+  return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
+}

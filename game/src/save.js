@@ -9,13 +9,14 @@ export function createSave() {
     save(G) {
       const p = G.player;
       const data = {
-        v: 1,
+        v: 2,
         x: p.x, y: p.y,
         health: p.health, armor: p.armor, cash: p.cash,
         weapon: p.weapon, ammo: p.ammo,
         storyIndex: G.missions.storyIndex,
         stats: G.stats,
         dayTime: G.dayTime,
+        weather: G.weather.kind,
         savedAt: Date.now(),
       };
       try { localStorage.setItem(SAVE_KEY, JSON.stringify(data)); return true; } catch { return false; }
@@ -35,6 +36,7 @@ export function createSave() {
         G.missions.objective = '';
         G.stats = { ...G.stats, ...(d.stats || {}) };
         G.dayTime = d.dayTime || 0.35;
+        if (d.weather) G.weather.set(d.weather);
         G.police.clear(G, true);
         G.camera.x = p.x; G.camera.y = p.y;
         return true;

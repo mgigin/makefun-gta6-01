@@ -1,12 +1,19 @@
-// Solmaris Heat — all sound is synthesized with WebAudio: engine, sirens, shots, music.
+// Solmaris Heat — all sound is synthesized with WebAudio: engine, sirens,
+// shots, rain on the bay, a helicopter rotor, and a lazy synthwave loop.
 export function createAudio() {
   let ctx = null;
   let master = null, musicGain = null, sfxGain = null;
   let engineOsc = null, engineGain = null;
   let sirenOsc = null, sirenGain = null, sirenTimer = null;
+  let rainSrc = null, rainGain = null;
+  let heliOsc = null, heliGain = null, heliLfo = null;
   let musicTimer = null, musicStep = 0;
+  let unlocked = false;
 
   function ensure() {
+    // Browsers refuse to start an AudioContext before a user gesture (and warn
+    // in the console), so the context is only created once unlock() has run.
+    if (!unlocked) return false;
     if (ctx) { if (ctx.state === 'suspended') ctx.resume(); return true; }
     try {
       ctx = new (window.AudioContext || window.webkitAudioContext)();
@@ -43,7 +50,7 @@ export function createAudio() {
   }
 
   return {
-    unlock() { ensure(); },
+    unlock() { unlocked = true; ensure(); },
     setVolumes(music, sfx) {
       if (!ensure()) return;
       musicGain.gain.value = music * 0.6;
@@ -51,7 +58,10 @@ export function createAudio() {
     },
     click() { tone(660, 0.06, 'square', 0.08); },
     door() { noise(0.12, 0.25, 500); tone(140, 0.1, 'sine', 0.15); },
-    shot(distant) { noise(0.14, distant ? 0.12 : 0.4, 2600); tone(160, 0.08, 'square', 0.12, null, 60); },
+    shot(distant, heavy) {
+      if (heavy) { noise(0.3, distant ? 0.2 : 0.55, 1600); tone(110, 0.18, 'square', 0.16, null, 45); }
+      else { noise(0.14, distant ? 0.12 : 0.4, 2600); tone(160, 0.08, 'square', 0.12, null, 60); }
+    },
     punch() { noise(0.08, 0.2, 700); },
     thud() { noise(0.15, 0.3, 400); },
     hurt() { tone(220, 0.15, 'sawtooth', 0.12, null, 110); },
@@ -98,6 +108,51 @@ export function createAudio() {
       if (sirenTimer) clearInterval(sirenTimer);
       sirenTimer = null;
       if (sirenOsc) { try { sirenOsc.stop(); } catch {} sirenOsc = null; sirenGain = null; }
+    },
+
+    // Looping filtered noise for rain.
+    rainStart() {
+      if (!ensure() || rainSrc) return;
+      const len = ctx.sampleRate * 2;
+      const buf = ctx.createBuffer(1, len, ctx.sampleRate);
+      const data = buf.getChannelData(0);
+      for (let i = 0; i < len; i++) data[i] = Math.random() * 2 - 1;
+      rainSrc = ctx.createBufferSource(); rainSrc.buffer = buf; rainSrc.loop = true;
+      const f = ctx.createBiquadFilter(); f.type = 'bandpass'; f.frequency.value = 900; f.Q.value = 0.4;
+      rainGain = ctx.createGain(); rainGain.gain.value = 0.0;
+      rainGain.gain.linearRampToValueAtTime(0.06, ctx.currentTime + 1.2);
+      rainSrc.connect(f); f.connect(rainGain); rainGain.connect(sfxGain);
+      rainSrc.start();
+    },
+    rainStop() {
+      if (rainSrc) {
+        try {
+          rainGain.gain.linearRampToValueAtTime(0, ctx.currentTime + 0.8);
+          const src = rainSrc;
+          setTimeout(() => { try { src.stop(); } catch {} }, 900);
+        } catch {}
+        rainSrc = null; rainGain = null;
+      }
+    },
+
+    // Helicopter rotor: a low pulse chopped by an LFO.
+    heliStart() {
+      if (!ensure() || heliOsc) return;
+      heliOsc = ctx.createOscillator();
+      heliOsc.type = 'sawtooth';
+      heliOsc.frequency.value = 46;
+      const f = ctx.createBiquadFilter(); f.type = 'lowpass'; f.frequency.value = 300;
+      heliGain = ctx.createGain(); heliGain.gain.value = 0.05;
+      heliLfo = ctx.createOscillator(); heliLfo.frequency.value = 11;
+      const lfoGain = ctx.createGain(); lfoGain.gain.value = 0.035;
+      heliLfo.connect(lfoGain); lfoGain.connect(heliGain.gain);
+      heliOsc.connect(f); f.connect(heliGain); heliGain.connect(sfxGain);
+      heliOsc.start(); heliLfo.start();
+    },
+    heliStop() {
+      if (heliOsc) { try { heliOsc.stop(); } catch {} heliOsc = null; }
+      if (heliLfo) { try { heliLfo.stop(); } catch {} heliLfo = null; }
+      heliGain = null;
     },
 
     // A lazy synthwave loop: bass pulse + pentatonic plucks, all generated.

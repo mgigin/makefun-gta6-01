@@ -1,19 +1,22 @@
 // Solmaris Heat — main: game state, input, loop, camera, shops, screens, boot.
 // An original open-world crime game: the bay city of Solmaris, fixer Dario Quint,
 // courier-turned-wheelman Mara Voss, and the Ledger crew who want the docks.
-import { TILE, GRID, WORLD, VIEW_W, VIEW_H, DAY_LENGTH, TRAFFIC } from './config.js';
+import { TILE, WORLD, VIEW_W, VIEW_H, DAY_LENGTH, TRAFFIC, WEAPONS } from './config.js';
 import { makeRng } from './random.js';
-import { buildCity, collideCircle, randomRoadPoint, tileKindAt, TILE_KIND } from './city.js';
-import { makeCar, updateTrafficCar, carSpeed } from './vehicles.js';
+import { buildCity, collideCircle, randomRoadPoint } from './city.js';
+import { makeCar, updateTrafficCar } from './vehicles.js';
 import { makePlayer, updatePlayer, nearestCar, enterCar, exitCar } from './player.js';
 import { spawnPeds, updatePed, maintainPeds } from './pedestrians.js';
 import { createPolice } from './police.js';
+import { createAirSupport } from './air.js';
+import { createWeather } from './weather.js';
 import { createCombat } from './combat.js';
 import { createMissions } from './missions.js';
 import { createAudio } from './audio.js';
 import { createSave, loadSettings, storeSettings } from './save.js';
 import { createHud } from './hud.js';
 import { createRenderer } from './render.js';
+import { updateParticles } from './effects.js';
 import { setupShot } from './shots.js';
 
 const canvas = document.getElementById('game-canvas');
@@ -30,6 +33,8 @@ const G = {
   particles: [],
   skids: [],
   police: createPolice(),
+  air: createAirSupport(),
+  weather: createWeather(),
   combat: createCombat(),
   missions: createMissions(),
   audio: createAudio(),
@@ -42,7 +47,7 @@ const G = {
   camera: { x: 0, y: 0 },
   fx: { shake: 0, hurtFlash: 0, lastShotAt: -10 },
   input: { up: false, down: false, left: false, right: false, sprint: false, handbrake: false, aiming: false, mouseX: VIEW_W / 2, mouseY: VIEW_H / 2, mouseDown: false },
-  stats: { carsStolen: 0, missionsDone: 0, taxiFares: 0, pedsDown: 0, enemiesDown: 0, shotsFired: 0, packages: 0, busted: 0, wasted: 0 },
+  stats: { carsStolen: 0, missionsDone: 0, taxiFares: 0, racesWon: 0, pedsDown: 0, enemiesDown: 0, shotsFired: 0, packages: 0, busted: 0, wasted: 0 },
   downTimer: 0,
 };
 
@@ -77,6 +82,7 @@ function goDown(word, sub) {
   G.audio.busted();
   G.audio.engineStop();
   G.audio.sirenStop();
+  G.audio.heliStop();
 }
 
 function respawn() {
@@ -106,8 +112,8 @@ function spawnTraffic() {
     });
     G.cars.push(car);
   }
-  // Parked cars along avenues.
-  for (let i = 0; i < 14; i++) {
+  // Parked cars along avenues and in the parking lots.
+  for (let i = 0; i < 16; i++) {
     const spot = randomRoadPoint(G.city, G.rng, p.x, p.y, 120);
     const car = makeCar(G.rng, spot.x + 16, spot.y, (i % 4) * Math.PI / 2, {});
     G.cars.push(car);
@@ -116,15 +122,15 @@ function spawnTraffic() {
 
 function maintainTraffic() {
   const p = G.player;
-  let traffic = G.cars.filter((c) => c.driver === 'traffic');
-  for (const car of traffic) {
+  for (const car of G.cars) {
+    if (car.driver !== 'traffic') continue;
     if (Math.hypot(car.x - p.x, car.y - p.y) > 1050) {
       const spot = randomRoadPoint(G.city, G.rng, p.x, p.y, 520);
       const from = G.city.nodes[spot.from], to = G.city.nodes[spot.to];
       car.x = spot.x; car.y = spot.y; car.vx = 0; car.vy = 0;
       car.angle = Math.atan2(to.y - from.y, to.x - from.x);
       car.nodeFrom = spot.from; car.nodeTo = spot.to;
-      car.health = 100; car.dead = false;
+      car.health = 100; car.dead = false; car.spiked = false;
     }
   }
 }
@@ -139,9 +145,9 @@ function updateShopsAndPrompts(dt) {
     const car = nearestCar(G, 46);
     if (car) prompt = `<b>E</b> — ${car.driver === 'traffic' ? 'steal' : 'drive'} ${car.model.name}`;
     if (Math.hypot(p.x - P.gunshop.x, p.y - P.gunshop.y) < 52) {
-      prompt = p.weapon === 'pistol'
-        ? '<b>E</b> — Iron & Oak: ammo + armor ($120)'
-        : '<b>E</b> — Iron & Oak: buy pistol ($250)';
+      prompt = p.weapon === 'fists'
+        ? '<b>E</b> — Iron & Oak: buy pistol ($250) · <b>Q</b> scattergun ($600)'
+        : '<b>E</b> — Iron & Oak: ammo + armor ($120)';
     } else if (Math.hypot(p.x - P.clinic.x, p.y - P.clinic.y) < 52) {
       prompt = '<b>E</b> — Clinic: full heal ($50)';
     } else if (Math.hypot(p.x - P.safehouse.x, p.y - P.safehouse.y) < 52) {
@@ -153,6 +159,8 @@ function updateShopsAndPrompts(dt) {
     prompt = '<b>E</b> — get out';
     if (Math.hypot(p.x - P.respray.x, p.y - P.respray.y) < 64) {
       prompt = G.police.stars > 0 ? '<b>E</b> — Chop & Shine respray ($100, clears heat)' : '<b>E</b> — Chop & Shine: repair ($60)';
+    } else if (Math.hypot(p.x - P.raceStart.x, p.y - P.raceStart.y) < 60 && !G.missions.active && !G.missions.streetRace) {
+      prompt = 'Street race meet — drive in to start';
     }
   }
   G.hud.prompt(prompt);
@@ -168,12 +176,14 @@ function interact() {
         p.cash -= 100;
         p.car.color = ['#3c6dc8', '#e0a83c', '#4fae62', '#d8d8dc'][Math.floor(Math.random() * 4)];
         p.car.health = 100;
+        p.car.spiked = false;
         G.police.clear(G);
-        G.hud.message('Resprayed. New colour, no heat.', 3);
+        G.hud.message('Resprayed. New colour, new tyres, no heat.', 3);
         G.audio.pickup();
       } else if (p.cash >= 60) {
         p.cash -= 60;
         p.car.health = 100;
+        p.car.spiked = false;
         G.hud.message('Repaired and polished.', 3);
         G.audio.pickup();
       } else G.hud.message('Not enough cash.', 2);
@@ -185,8 +195,8 @@ function interact() {
   }
   // On foot interactions, nearest first.
   if (Math.hypot(p.x - P.gunshop.x, p.y - P.gunshop.y) < 52) {
-    if (p.weapon !== 'pistol') {
-      if (p.cash >= 250) { p.cash -= 250; p.weapon = 'pistol'; p.ammo = 60; G.hud.message('Pistol acquired. Click to shoot.', 3.5); G.audio.pickup(); }
+    if (p.weapon === 'fists') {
+      if (p.cash >= WEAPONS.pistol.price) { p.cash -= WEAPONS.pistol.price; p.weapon = 'pistol'; p.ammo = 60; G.hud.message('Pistol acquired. Click to shoot.', 3.5); G.audio.pickup(); }
       else G.hud.message('Pistol costs $250.', 2);
     } else if (p.cash >= 120) {
       p.cash -= 120; p.ammo += 60; p.armor = Math.min(100, p.armor + 60);
@@ -215,6 +225,25 @@ function interact() {
   }
 }
 
+// Q at Iron & Oak buys the scattergun; elsewhere Q swaps between owned guns.
+function weaponKey() {
+  const p = G.player;
+  const P = G.city.places;
+  if (G.state !== 'play' || p.mode !== 'foot') return;
+  if (Math.hypot(p.x - P.gunshop.x, p.y - P.gunshop.y) < 52 && p.weapon !== 'scattergun') {
+    if (p.cash >= WEAPONS.scattergun.price) {
+      p.cash -= WEAPONS.scattergun.price;
+      p.weapon = 'scattergun';
+      p.ammo = Math.max(p.ammo, 24);
+      G.hud.message('Scattergun acquired. Big spread, big noise.', 3.5);
+      G.audio.pickup();
+    } else G.hud.message('Scattergun costs $600.', 2);
+    return;
+  }
+  if (p.weapon === 'pistol') { p.weapon = 'scattergun'; G.hud.feed('Scattergun'); }
+  else if (p.weapon === 'scattergun') { p.weapon = 'pistol'; G.hud.feed('Pistol'); }
+}
+
 // ---------- Simulation step (shared by the live loop and screenshot scenes) ----------
 G.step = function step(dt, scripted = {}) {
   G.time += dt;
@@ -232,6 +261,7 @@ G.step = function step(dt, scripted = {}) {
   }
   if (G.state !== 'play') return;
 
+  G.weather.update(G, dt);
   updatePlayer(G, input, dt);
   if (scripted.shoot || (G.input.mouseDown && G.player.mode === 'foot')) G.combat.shoot(G);
   for (const car of G.cars) {
@@ -241,6 +271,7 @@ G.step = function step(dt, scripted = {}) {
   for (const ped of G.peds) updatePed(G, ped, dt);
   maintainPeds(G);
   G.police.update(G, dt);
+  G.air.update(G, dt);
   G.combat.update(G, dt);
   G.missions.update(G, dt);
   updateShopsAndPrompts(dt);
@@ -259,14 +290,7 @@ G.step = function step(dt, scripted = {}) {
     }
   }
 
-  // Particles
-  for (const pt of G.particles) {
-    pt.t += dt;
-    pt.x += pt.vx * dt;
-    pt.y += pt.vy * dt;
-    if (pt.kind === 'smoke') pt.vy -= 12 * dt;
-  }
-  G.particles = G.particles.filter((pt) => pt.t < pt.life);
+  updateParticles(G, dt);
   G.fx.hurtFlash = Math.max(0, G.fx.hurtFlash - dt);
 
   // Camera: smooth follow with velocity lookahead + shake.
@@ -295,6 +319,7 @@ window.addEventListener('keydown', (e) => {
   if (KEYMAP[e.code]) { G.input[KEYMAP[e.code]] = true; e.preventDefault(); }
   if (e.code === 'KeyE' && !e.repeat) interact();
   if (e.code === 'KeyF' && !e.repeat) G.combat.punch(G);
+  if (e.code === 'KeyQ' && !e.repeat) weaponKey();
   if (e.code === 'KeyM' && !e.repeat) toggleMap();
   if ((e.code === 'Escape' || e.code === 'KeyP') && !e.repeat) togglePause();
 });
@@ -335,7 +360,7 @@ function startPlay(fresh) {
     G.missions.storyIndex = 0;
     G.missions.active = null;
     G.missions.objective = '';
-    G.stats = { carsStolen: 0, missionsDone: 0, taxiFares: 0, pedsDown: 0, enemiesDown: 0, shotsFired: 0, packages: 0, busted: 0, wasted: 0 };
+    G.stats = { carsStolen: 0, missionsDone: 0, taxiFares: 0, racesWon: 0, pedsDown: 0, enemiesDown: 0, shotsFired: 0, packages: 0, busted: 0, wasted: 0 };
     G.police.clear(G, true);
     G.camera.x = p.x - VIEW_W / 2; G.camera.y = p.y - VIEW_H / 2;
   }
@@ -352,8 +377,9 @@ function togglePause() {
     G.state = 'pause';
     const p = G.player;
     document.getElementById('pause-stats').innerHTML =
-      `Cash $${Math.floor(p.cash)} · Jobs done ${G.stats.missionsDone}/6 · Cars stolen ${G.stats.carsStolen}<br>` +
-      `Taxi fares ${G.stats.taxiFares} · Hidden packages ${G.stats.packages}/10 · Busted ${G.stats.busted} · Wasted ${G.stats.wasted}`;
+      `Cash $${Math.floor(p.cash)} · Jobs done ${G.stats.missionsDone}/8 · Cars stolen ${G.stats.carsStolen}<br>` +
+      `Taxi fares ${G.stats.taxiFares} · Races won ${G.stats.racesWon || 0} · Hidden packages ${G.stats.packages}/10<br>` +
+      `Busted ${G.stats.busted} · Wasted ${G.stats.wasted} · Shots fired ${G.stats.shotsFired}`;
     showScreen('pause');
   } else if (G.state === 'pause') {
     G.state = 'play';
@@ -404,6 +430,7 @@ setSfx.value = Math.round(G.settings.sfx * 100);
 setMinimap.checked = G.settings.minimap;
 setShake.checked = G.settings.shake;
 function applySettings() {
+  G.audio.unlock();
   G.settings.music = setMusic.value / 100;
   G.settings.sfx = setSfx.value / 100;
   G.settings.minimap = setMinimap.checked;
@@ -415,7 +442,7 @@ for (const el of [setMusic, setSfx, setMinimap, setShake]) el.addEventListener('
 
 // ---------- Boot ----------
 spawnTraffic();
-spawnPeds(G, 22);
+spawnPeds(G, 24);
 G.combat.scatterPackages(G);
 refreshContinue();
 

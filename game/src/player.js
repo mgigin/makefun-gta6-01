@@ -1,4 +1,5 @@
-// Solmaris Heat — the player: on-foot movement, driving, entering and stealing cars.
+// Solmaris Heat — the player: on-foot movement with sprint stamina, driving,
+// entering and stealing cars, and getting shoved around by traffic.
 import { PLAYER } from './config.js';
 import { collideCircle } from './city.js';
 import { driveCarPhysics, carSpeed } from './vehicles.js';
@@ -14,6 +15,7 @@ export function makePlayer(x, y) {
     cash: 120,
     weapon: 'fists',
     ammo: 0,
+    stamina: 1,
     walkPhase: 0,
     shootCd: 0,
     punchCd: 0,
@@ -37,6 +39,7 @@ export function updatePlayer(G, input, dt) {
     p.x = car.x; p.y = car.y;
     p.angle = car.angle;
     p.vx = car.vx; p.vy = car.vy;
+    p.stamina = Math.min(1, p.stamina + PLAYER.staminaRegen * dt);
     if (car.dead) exitCar(G);
     return;
   }
@@ -45,11 +48,14 @@ export function updatePlayer(G, input, dt) {
   let mx = (input.right ? 1 : 0) - (input.left ? 1 : 0);
   let my = (input.down ? 1 : 0) - (input.up ? 1 : 0);
   const len = Math.hypot(mx, my);
-  const speed = input.sprint ? PLAYER.sprintSpeed : PLAYER.walkSpeed;
+  const sprinting = input.sprint && p.stamina > 0.02 && len > 0;
+  const speed = sprinting ? PLAYER.sprintSpeed : PLAYER.walkSpeed;
+  if (sprinting) p.stamina = Math.max(0, p.stamina - PLAYER.staminaDrain * dt);
+  else p.stamina = Math.min(1, p.stamina + PLAYER.staminaRegen * dt);
   if (len > 0) {
     mx /= len; my /= len;
     p.vx = mx * speed; p.vy = my * speed;
-    p.walkPhase += dt * (input.sprint ? 13 : 9);
+    p.walkPhase += dt * (sprinting ? 13 : 9);
     if (!input.aiming) p.angle = Math.atan2(my, mx);
   } else {
     p.vx = 0; p.vy = 0;
