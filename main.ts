@@ -1,20 +1,11 @@
-// Solmaris Heat entry point (Node 22, standard library only).
+// Solmaris Heat — the entry program (Node 22, standard library only).
+// The game itself is the static site under game/ (game/index.html plus its ES
+// modules, no library, no network request). This program hands it in: it
+// copies game/ and screenshots/ from beside this file into /output and writes
+// /output/dossier.json with the vendored make.fun library, which is the
+// summary the judge reads.
 //
-// The game lives in this directory's game/ folder: plain static files a desktop
-// browser loads offline (game/index.html plus its ES modules — no library, no
-// build step, no network request). This program hands the game in: it copies
-// game/ and screenshots/ from beside this file to /output and writes
-// /output/dossier.json with buildDossier from the vendored make.fun library.
-//
-// Solmaris Heat is an original open-world crime game. Explore the bay city of
-// Solmaris on foot and by car, steal cars, run eight story jobs for fixer
-// Dario Quint against the Ledger crew, dodge a five-star wanted system with
-// roadblocks, spike strips and a police helicopter, drive taxi fares, win
-// street races, find hidden packages, and save your progress. Vanilla canvas,
-// every sound synthesized with WebAudio, zero assets, zero network.
-//
-// Serve it locally with `node serve.ts`, then open http://localhost:8080.
-// Outside the grader's container, MAKEFUN_OUTPUT_DIR stands in for /output:
+// Outside the grader, MAKEFUN_OUTPUT_DIR stands in for /output:
 //   mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts
 
 import { cpSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
@@ -33,10 +24,11 @@ if (existsSync(join(here, 'screenshots'))) {
 }
 
 // The scorer's own caps (reference/gate.json): only text_max_bytes shapes the
-// bytes; the others refuse an entry the scorer would refuse (more than 4
-// screenshots or one over 256 KiB; more than 993 files in game/ or 48 MiB of
-// game files in all, or a path under game/ over 1000 bytes: game/ counts
-// beside /output's own 1000-entry cap, its screenshots/ and dossier.json).
+// dossier's bytes; the others make the library refuse an entry the scorer
+// would refuse (more than 4 screenshots or one over 256 KiB; more than 993
+// files in game/, 48 MiB of game files in all, or a path under game/ over
+// 1000 bytes — game/ shares /output's own 1000-entry cap with screenshots/
+// and dossier.json).
 writeFileSync(
   join(out, 'dossier.json'),
   buildDossier(out, {
