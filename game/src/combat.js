@@ -1,210 +1,169 @@
-// Solmaris Heat — combat: pistol and scattergun fire, punches, Ledger gang
-// enemies (shooters who keep their distance, rushers who close in swinging),
-// damage, pickups and hidden packages.
-import { WEAPONS } from './config.js';
-import { hurtPed } from './pedestrians.js';
-import { damageCar } from './vehicles.js';
-import { rngRange } from './random.js';
-import { muzzleFlash, bloodPuff } from './effects.js';
+// Combat: the player's weapons (fists to rifle, the scattergun in between),
+// projectiles, and what happens when they land — on pedestrians, on cars, and
+// on Mara herself. Gunfire is loud: it panics the street and feeds the heat.
 
-export function createCombat() {
-  return {
-    bullets: [],   // tracers for rendering
-    enemies: [],   // hostile gang members (mission-spawned)
-    pickups: [],   // {x,y,kind:'health'|'armor'|'cash'|'package'}
+import { WEAPONS } from './data.js';
+import { hurtPed } from './peds.js';
+import { damageCar, carCircles } from './vehicles.js';
+import { pointInBuilding } from './city.js';
+import { dist2 } from './rng.js';
+import { feed } from './state.js';
 
-    // One raycast shot; returns the distance the tracer travels.
-    fireRay(G, angle, range, damage) {
-      const p = G.player;
-      const dx = Math.cos(angle), dy = Math.sin(angle);
-      let hitDist = range;
-      // Buildings block shots.
-      for (let d = 14; d < range; d += 10) {
-        const x = p.x + dx * d, y = p.y + dy * d;
-        if (G.pointInBuilding(x, y)) { hitDist = d; break; }
+export function spawnBullet(game, x, y, angle, opts) {
+  game.bullets.push({
+    x, y,
+    vx: Math.cos(angle) * opts.speed,
+    vy: Math.sin(angle) * opts.speed,
+    life: opts.range / opts.speed,
+    damage: opts.damage,
+    from: opts.from,
+  });
+}
+
+/** The player pulls the trigger (or swings). Returns true if a shot went out. */
+export function playerFire(game) {
+  const p = game.player;
+  const w = WEAPONS[p.weapon];
+  if (p.fireCd > 0 || p.dead) return false;
+  if (p.weapon === 'fists') {
+    p.fireCd = w.rate;
+    // A punch lands on whoever is right in front.
+    const fx = p.x + Math.cos(p.aim) * 22;
+    const fy = p.y + Math.sin(p.aim) * 22;
+    for (const ped of game.peds) {
+      if (!ped.down && dist2(fx, fy, ped.x, ped.y) < 20 * 20) {
+        hurtPed(game, ped, w.damage);
+        game.onCrime?.('assault');
+        break;
       }
-      const hitTest = (o, r) => {
-        const ox = o.x - p.x, oy = o.y - p.y;
-        const along = ox * dx + oy * dy;
-        if (along < 0 || along > hitDist) return false;
-        const perp = Math.abs(ox * -dy + oy * dx);
-        return perp < r;
-      };
-      for (const e of this.enemies) {
-        if (e.state !== 'down' && hitTest(e, 13)) { this.hurtEnemy(G, e, damage); return Math.hypot(e.x - p.x, e.y - p.y); }
+    }
+    return true;
+  }
+  if ((p.ammo[p.weapon] || 0) <= 0) {
+    p.fireCd = 0.3;
+    feed(game, `${w.name} is empty — buy ammo at Iron & Oak`);
+    return false;
+  }
+  p.ammo[p.weapon] -= 1;
+  p.fireCd = w.rate;
+  game.lastShotAt = game.time;
+  const mx = p.x + Math.cos(p.aim) * 16;
+  const my = p.y + Math.sin(p.aim) * 16;
+  for (let i = 0; i < w.pellets; i += 1) {
+    const spread = (game.rng() * 2 - 1) * w.spread;
+    spawnBullet(game, mx, my, p.aim + spread, { speed: w.speed, range: w.range, damage: w.damage, from: 'player' });
+  }
+  game.muzzle = { x: mx, y: my, angle: p.aim, at: game.time };
+  game.onCrime?.('shoot');
+  game.audio?.shot(p.weapon);
+  return true;
+}
+
+/** Damage Mara; armor soaks first. Returns true when she goes down. */
+export function hurtPlayer(game, amount) {
+  const p = game.player;
+  if (p.dead) return false;
+  let left = amount;
+  if (p.armor > 0) {
+    const soaked = Math.min(p.armor, left * 0.7);
+    p.armor -= soaked;
+    left -= soaked;
+  }
+  p.hp -= left;
+  p.hurtFlash = 0.35;
+  if (p.hp <= 0) {
+    p.hp = 0;
+    p.dead = true;
+    return true;
+  }
+  return false;
+}
+
+/** Step every bullet; walls stop them, bodies and cars take the hit. */
+export function stepBullets(game, dt) {
+  const p = game.player;
+  const px = p.inCar ? p.inCar.x : p.x;
+  const py = p.inCar ? p.inCar.y : p.y;
+  for (let i = game.bullets.length - 1; i >= 0; i -= 1) {
+    const b = game.bullets[i];
+    b.life -= dt;
+    b.x += b.vx * dt;
+    b.y += b.vy * dt;
+    let dead = b.life <= 0 || pointInBuilding(game.city, b.x, b.y);
+    if (!dead && b.from !== 'player') {
+      // Shots at Mara (or her car).
+      const targetR = p.inCar ? 24 : 11;
+      if (dist2(b.x, b.y, px, py) < targetR * targetR) {
+        if (p.inCar) damageCar(game, p.inCar, b.damage * 0.8, game.time);
+        else hurtPlayer(game, b.damage);
+        dead = true;
       }
-      for (const ped of G.peds) {
-        if (ped.state !== 'down' && !ped.hidden && hitTest(ped, 11)) { hurtPed(G, ped, damage, null); return Math.hypot(ped.x - p.x, ped.y - p.y); }
-      }
-      for (const car of G.cars) {
-        if (hitTest(car, 24)) {
-          damageCar(G, car, 7);
-          if (car.isPolice) G.police.addCrime(G, 'hitCop');
-          return Math.hypot(car.x - p.x, car.y - p.y);
+    }
+    if (!dead) {
+      for (const ped of game.peds) {
+        if (ped.down) continue;
+        if (b.from === 'gang' && ped.hostile) continue;
+        if (dist2(b.x, b.y, ped.x, ped.y) < 10 * 10) {
+          const killed = hurtPed(game, ped, b.damage);
+          if (b.from === 'player') game.onCrime?.(killed ? 'kill' : 'shoot-person');
+          dead = true;
+          break;
         }
       }
-      return hitDist;
-    },
-
-    shoot(G) {
-      const p = G.player;
-      const w = WEAPONS[p.weapon];
-      if (!w || p.weapon === 'fists' || p.ammo <= 0 || p.shootCd > 0 || p.mode !== 'foot') return;
-      p.shootCd = w.rate;
-      p.ammo--;
-      G.stats.shotsFired++;
-      G.fx.lastShotAt = G.time;
-      G.audio.shot(false, p.weapon === 'scattergun');
-      G.fx.shake = Math.min(6, G.fx.shake + (p.weapon === 'scattergun' ? 2.4 : 1.2));
-      const pellets = w.pellets || 1;
-      for (let i = 0; i < pellets; i++) {
-        const spread = p.weapon === 'scattergun'
-          ? rngRange(Math.random, -0.11, 0.11)
-          : rngRange(Math.random, -0.035, 0.035);
-        const a = p.angle + spread;
-        const dist = this.fireRay(G, a, w.range, w.damage);
-        this.bullets.push({
-          x1: p.x + Math.cos(a) * 16, y1: p.y + Math.sin(a) * 16,
-          x2: p.x + Math.cos(a) * dist, y2: p.y + Math.sin(a) * dist, t: 0,
-        });
-      }
-      muzzleFlash(G, p.x + Math.cos(p.angle) * 18, p.y + Math.sin(p.angle) * 18, p.angle);
-      G.police.addCrime(G, 'shoot');
-    },
-
-    punch(G) {
-      const p = G.player;
-      if (p.mode !== 'foot' || p.punchCd > 0) return;
-      p.punchCd = 0.38;
-      G.audio.punch();
-      const fx = p.x + Math.cos(p.angle) * 20, fy = p.y + Math.sin(p.angle) * 20;
-      for (const e of this.enemies) {
-        if (e.state !== 'down' && Math.hypot(e.x - fx, e.y - fy) < 24) { this.hurtEnemy(G, e, 16); return; }
-      }
-      for (const ped of G.peds) {
-        if (ped.state !== 'down' && !ped.hidden && Math.hypot(ped.x - fx, ped.y - fy) < 22) {
-          hurtPed(G, ped, 16, null);
-          G.police.addCrime(G, 'assault');
-          return;
-        }
-      }
-    },
-
-    hurtEnemy(G, e, amount) {
-      e.health -= amount;
-      e.aggro = true;
-      bloodPuff(G, e.x, e.y);
-      if (e.health <= 0 && e.state !== 'down') {
-        e.state = 'down';
-        e.downAt = G.time;
-        G.stats.enemiesDown++;
-        this.pickups.push({ x: e.x, y: e.y, kind: 'cash', amount: 40 + Math.floor(Math.random() * 60) });
-        G.missions.onEnemyDown(e);
-      }
-    },
-
-    damagePlayer(G, amount, cause) {
-      const p = G.player;
-      if (p.dead || G.state !== 'play') return;
-      let left = amount;
-      if (p.armor > 0) {
-        const absorbed = Math.min(p.armor, left * 0.7);
-        p.armor -= absorbed;
-        left -= absorbed;
-      }
-      p.health -= left;
-      G.fx.hurtFlash = 0.35;
-      G.audio.hurt();
-      if (p.health <= 0) {
-        p.health = 0;
-        G.onWasted(cause);
-      }
-    },
-
-    spawnEnemy(G, x, y, kind = 'shooter') {
-      const e = {
-        x, y, angle: 0, kind,
-        health: kind === 'rusher' ? 80 : 60,
-        state: 'idle', aggro: false,
-        shootCd: rngRange(Math.random, 0.5, 1.5),
-        swingCd: 0,
-        walkPhase: 0,
-        speed: kind === 'rusher' ? 150 : 105,
-      };
-      this.enemies.push(e);
-      return e;
-    },
-
-    update(G, dt) {
-      const p = G.player;
-      // Tracers fade.
-      this.bullets = this.bullets.filter((b) => (b.t += dt) < 0.07);
-      // Enemies: shooters keep range and fire; rushers close in and swing.
-      for (const e of this.enemies) {
-        if (e.state === 'down') continue;
-        e.walkPhase += dt * 10;
-        const d = Math.hypot(p.x - e.x, p.y - e.y);
-        if (d < 300) e.aggro = true;
-        if (!e.aggro) continue;
-        e.angle = Math.atan2(p.y - e.y, p.x - e.x);
-        if (e.kind === 'rusher') {
-          if (d > 26) {
-            e.x += Math.cos(e.angle) * e.speed * dt;
-            e.y += Math.sin(e.angle) * e.speed * dt;
-            G.collide(e, 9);
-          } else {
-            e.swingCd -= dt;
-            if (e.swingCd <= 0) {
-              e.swingCd = 0.7;
-              G.audio.punch();
-              this.damagePlayer(G, 11, 'beaten down');
-            }
-          }
-        } else {
-          if (d > 130) {
-            e.x += Math.cos(e.angle) * e.speed * dt;
-            e.y += Math.sin(e.angle) * e.speed * dt;
-            G.collide(e, 9);
-          }
-          e.shootCd -= dt;
-          if (e.shootCd <= 0 && d < 320) {
-            e.shootCd = rngRange(Math.random, 0.7, 1.4);
-            G.audio.shot(true);
-            G.fx.lastShotAt = G.time;
-            const a = e.angle + rngRange(Math.random, -0.09, 0.09);
-            this.bullets.push({ x1: e.x, y1: e.y, x2: e.x + Math.cos(a) * d, y2: e.y + Math.sin(a) * d, t: 0 });
-            muzzleFlash(G, e.x + Math.cos(a) * 14, e.y + Math.sin(a) * 14, a);
-            if (Math.random() < 0.42) this.damagePlayer(G, p.mode === 'car' ? 4 : 9, 'shot');
+    }
+    if (!dead) {
+      for (const car of game.cars) {
+        if (car.dead) continue;
+        for (const c of carCircles(car)) {
+          if (dist2(b.x, b.y, c.x, c.y) < c.r * c.r) {
+            damageCar(game, car, b.damage * 0.9, game.time);
+            if (b.from === 'player' && car.police) game.onCrime?.('shoot-police');
+            dead = true;
+            break;
           }
         }
+        if (dead) break;
       }
-      this.enemies = this.enemies.filter((e) => e.state !== 'down' || G.time - (e.downAt || 0) < 20);
+    }
+    if (dead) game.bullets.splice(i, 1);
+  }
+  // Shots queued by gang members and police.
+  for (const s of game.pendingShots) {
+    const spread = (game.rng() * 2 - 1) * (s.spread || 0.05);
+    spawnBullet(game, s.x + Math.cos(s.angle) * 14, s.y + Math.sin(s.angle) * 14, s.angle + spread, {
+      speed: 780, range: 340, damage: s.damage, from: s.from,
+    });
+    game.lastShotAt = game.time;
+  }
+  game.pendingShots.length = 0;
+}
 
-      // Pickups.
-      for (const pk of this.pickups) {
-        if (Math.hypot(pk.x - p.x, pk.y - p.y) < 26) {
-          pk.taken = true;
-          if (pk.kind === 'health') { p.health = Math.min(100, p.health + 50); G.hud.feed('Health restored'); }
-          if (pk.kind === 'armor') { p.armor = Math.min(100, p.armor + 60); G.hud.feed('Armor up'); }
-          if (pk.kind === 'cash') { p.cash += pk.amount; G.hud.feed(`+$${pk.amount}`); }
-          if (pk.kind === 'package') {
-            G.stats.packages++;
-            p.cash += 100;
-            G.hud.feed(`Hidden package ${G.stats.packages}/10 — +$100`);
-          }
-          G.audio.pickup();
-        }
-      }
-      this.pickups = this.pickups.filter((pk) => !pk.taken);
-    },
-
-    scatterPackages(G) {
-      const spots = [
-        [3, 3], [21, 2], [7, 18], [17, 8], [12, 22], [2, 12], [22, 16], [9, 2], [18, 21], [5, 9],
-      ];
-      for (const [tx, ty] of spots) {
-        this.pickups.push({ x: tx * 48 + 24, y: ty * 48 + 24, kind: 'package' });
-      }
-    },
-  };
+/** A car fireball: damages everything close, shakes the camera, makes noise. */
+export function explodeCar(game, car) {
+  const R = 95;
+  for (const ped of game.peds) {
+    if (!ped.down && dist2(ped.x, ped.y, car.x, car.y) < R * R) hurtPed(game, ped, 90);
+  }
+  for (const other of game.cars) {
+    if (other !== car && !other.dead && dist2(other.x, other.y, car.x, car.y) < R * R) {
+      damageCar(game, other, 55, game.time);
+    }
+  }
+  const p = game.player;
+  const px = p.inCar ? p.inCar.x : p.x;
+  const py = p.inCar ? p.inCar.y : p.y;
+  if (dist2(px, py, car.x, car.y) < R * R) {
+    if (p.inCar) damageCar(game, p.inCar, 60, game.time);
+    else hurtPlayer(game, 55);
+  }
+  game.camera.shake = Math.max(game.camera.shake, 14);
+  game.audio?.explosion();
+  for (let i = 0; i < 26; i += 1) {
+    game.particles.push({
+      x: car.x, y: car.y,
+      vx: (game.rng() - 0.5) * 260, vy: (game.rng() - 0.5) * 260,
+      life: 0.5 + game.rng() * 0.8, maxLife: 1.3,
+      size: 5 + game.rng() * 10, kind: 'fire',
+    });
+  }
 }

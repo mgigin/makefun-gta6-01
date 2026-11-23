@@ -1,131 +1,154 @@
-// Solmaris Heat — deterministic screenshot scenes (?shot=chase|onfoot|mission|start&seed=1).
-// Each scene stages the world, simulates a few seconds with scripted input, renders one
-// frame, then sets window.__shotReady for the headless capture.
-import { makeCar } from './vehicles.js';
-import { makePed } from './pedestrians.js';
-import { TILE, POLICE_MODEL } from './config.js';
+// The screenshot scenes behind ?shot=chase|onfoot|mission|start. Each one
+// builds a real moment of play — a four-star chase with the helicopter up, a
+// morning on foot in the Old Market, a street race in the rain, the title
+// over the bay — then lets the ordinary simulation run it forward under a
+// simple autopilot, so the frame is what the game really looks like and the
+// same seed always gives the same frame.
 
-export function setupShot(G, name) {
-  const P = G.city.places;
-  const p = G.player;
-  G.state = 'play';
-  G.hud.show();
-  document.getElementById('screen-start').classList.add('hidden');
+import { makeCar } from './vehicles.js';
+import { startMission, startRace, roadTargetToward } from './missions.js';
+import { makePed } from './peds.js';
+import { setSceneWeather } from './weather.js';
+import { SCREEN } from './state.js';
+import { clamp, angleDiff, range } from './rng.js';
+
+export const SHOT_NAMES = ['chase', 'onfoot', 'mission', 'start'];
+
+function placePlayerInCar(game, modelIndex, x, y, angle) {
+  const car = makeCar(game, modelIndex, x, y, angle, { kind: 'player' });
+  game.player.inCar = car;
+  game.player.x = x;
+  game.player.y = y;
+  game.camera.x = x;
+  game.camera.y = y;
+  return car;
+}
+
+/** Set the world up for a named scene. Returns the screen to show. */
+export function stageShot(game, name) {
+  const city = game.city;
+  game.screen = SCREEN.PLAY;
+  game.player.owned.pistol = true;
+  game.player.ammo.pistol = 60;
+  game.player.owned.scattergun = true;
+  game.player.ammo.scattergun = 24;
+  game.player.weapon = 'scattergun';
+  game.cash = 1240;
+
+  // A little street life near the action, so the frame feels inhabited.
+  const seedCrowd = (cx, cy, n) => {
+    for (let i = 0; i < n; i += 1) {
+      makePed(game, cx + range(game.rng, -260, 260), cy + range(game.rng, -180, 180));
+    }
+  };
 
   if (name === 'start') {
-    G.state = 'title';
-    G.hud.hide();
-    document.getElementById('screen-start').classList.remove('hidden');
-    G.camera.x = 0;
-    G.camera.y = 6 * TILE;
-    G.dayTime = 0.62; // golden hour behind the title
-    G.renderFrame();
-    window.__shotReady = true;
-    return;
-  }
-
-  if (name === 'chase') {
-    // Cover shot: 4-star dusk chase — stolen coupe at speed, two cruisers on the
-    // tail, the police helicopter's searchlight raking in, a roadblock ahead,
-    // mission objective + minimap + stars all on the HUD.
-    G.dayTime = 0.74; // dusk, streetlights coming on
-    const car = makeCar(G.rng, 10 * TILE + 24, 18 * TILE + 24, -Math.PI / 2, {
-      driver: 'player', color: '#c8433c',
-      model: { name: 'Bayside Coupe', kind: 'coupe', top: 452, accel: 384, grip: 7.0 },
-    });
-    car.stolen = true;
-    car.vy = -330;
-    G.cars.push(car);
-    p.mode = 'car'; p.car = car; p.x = car.x; p.y = car.y;
-    p.cash = 2140; p.weapon = 'pistol'; p.ammo = 48; p.armor = 60;
-    G.police.stars = 4;
-    G.missions.objective = 'Deliver the Sunrunner to Chop & Shine — lose the heat first';
-    G.missions.marker = { x: P.respray.x, y: P.respray.y, kind: 'job' };
-    // Two cruisers already on the tail.
-    for (let i = 0; i < 2; i++) {
-      const cop = makeCar(G.rng, car.x + (i ? 30 : -30), car.y + 170 + i * 80, -Math.PI / 2, {
-        driver: 'police', isPolice: true, color: '#e8ecf2', model: POLICE_MODEL,
-      });
-      cop.vy = -300;
-      G.cars.push(cop);
-    }
-    // Roadblock across the avenue ahead.
-    for (const side of [-1, 1]) {
-      const block = makeCar(G.rng, car.x + side * 22, car.y - 430, 0, {
-        driver: 'none', isPolice: true, color: '#e8ecf2', model: POLICE_MODEL,
-      });
-      G.cars.push(block);
-    }
-    // Helicopter overhead with the light on the player.
-    G.air.heli = {
-      x: car.x - 120, y: car.y - 180, angle: 0.6, rotor: 1.2,
-      spotX: car.x, spotY: car.y, holding: true,
-    };
-    // Clear the lane so the scripted drive stays at speed.
-    G.cars = G.cars.filter((c) => c === car || c.isPolice || Math.abs(c.x - car.x) > 130 || c.y > car.y + 40);
-    // Scripted drive north up the avenue for ~1.3 simulated seconds.
-    for (let i = 0; i < 80; i++) {
-      G.step(1 / 60, { up: true });
-    }
-    G.police.stars = 4;
-    G.hud.clearFeed();
-    G.hud.feed('Roadblock ahead!');
-    G.hud.feed('Police helicopter inbound — stay out of the light');
-    G.renderFrame();
-    window.__shotReady = true;
-    return;
+    setSceneWeather(game, 18 * 60 + 55, 0);
+    const downtown = city.pois.gunshop;
+    game.camera.x = downtown.x;
+    game.camera.y = downtown.y + 120;
+    game.player.x = downtown.x;
+    game.player.y = downtown.y + 200;
+    return SCREEN.TITLE;
   }
 
   if (name === 'onfoot') {
-    // On foot downtown at golden hour: peds on the sidewalk, shopfronts,
-    // the fixer marker, a parked convertible, morning traffic rolling past.
-    G.dayTime = 0.3; // early morning gold
-    p.x = P.fixer.x - 90; p.y = P.fixer.y + 40;
-    p.angle = -0.6;
-    p.cash = 340;
-    G.missions.marker = { x: P.fixer.x, y: P.fixer.y, kind: 'fixer' };
-    G.missions.objective = 'See Dario Quint for work';
-    for (let i = 0; i < 12; i++) {
-      const ped = makePed(G.rng, p.x + (G.rng() - 0.5) * 460, p.y + (G.rng() - 0.5) * 320);
-      G.peds.push(ped);
-    }
-    const parked = makeCar(G.rng, p.x + 120, p.y - 60, Math.PI / 2, {
-      color: '#3ca8a0', model: { name: 'Sunrunner Convertible', kind: 'convertible', top: 442, accel: 366, grip: 6.8 },
-    });
-    G.cars.push(parked);
-    for (let i = 0; i < 60; i++) G.step(1 / 60, {});
-    G.renderFrame();
-    window.__shotReady = true;
-    return;
+    setSceneWeather(game, 9 * 60 + 30, 0);
+    const market = city.pois.garage;
+    game.player.x = market.x - 46;
+    game.player.y = market.y + 14;
+    game.player.angle = 0.4;
+    game.player.aim = 0.4;
+    game.camera.x = game.player.x;
+    game.camera.y = game.player.y;
+    seedCrowd(game.player.x, game.player.y, 10);
+    return SCREEN.PLAY;
   }
 
   if (name === 'mission') {
-    // Dockside Diplomacy mid-fight in the rain at night: Ledger shooters and a
-    // rusher, muzzle flashes, wet streets, the bookkeeper van parked nearby.
-    G.dayTime = 0.86; // night
-    G.weather.set('rain');
-    p.x = 3 * TILE + 24; p.y = 19 * TILE + 24;
-    p.weapon = 'scattergun'; p.ammo = 24; p.armor = 40; p.health = 82; p.cash = 1860;
-    p.angle = -Math.PI / 2;
-    G.missions.objective = 'Take down the Ledger crew (4 left)';
-    G.combat.spawnEnemy(G, p.x - 62, p.y - 105, 'shooter').aggro = true;
-    G.combat.spawnEnemy(G, p.x + 62, p.y - 120, 'shooter').aggro = true;
-    G.combat.spawnEnemy(G, p.x + 20, p.y - 80, 'rusher').aggro = true;
-    G.combat.spawnEnemy(G, p.x - 30, p.y - 150, 'shooter').aggro = true;
-    const van = makeCar(G.rng, p.x + 170, p.y - 40, 0.4, { color: '#2f2f36', model: { name: 'Dockside Van', kind: 'van', top: 332, accel: 272, grip: 5.2 } });
-    G.cars.push(van);
-    for (let i = 0; i < 40; i++) {
-      G.step(1 / 60, { aiming: true, mouseX: 640, mouseY: 200, shoot: i >= 38 });
-    }
-    G.hud.clearFeed();
-    G.hud.feed('Ledger crew spotted — weapons free');
-    G.renderFrame();
-    window.__shotReady = true;
-    return;
+    setSceneWeather(game, 16 * 60 + 40, 0.75);
+    const meet = city.pois.racemeet;
+    const car = placePlayerInCar(game, 6, meet.x - 10, meet.y + 40, -Math.PI / 2);
+    car.speed = 200;
+    startRace(game, { story: true });
+    game.story.active = null; // the race alone carries the frame
+    // Stagger the rivals up the road ahead so the pack reads at a glance.
+    game.side.race.rivals.forEach((rival, i) => {
+      rival.x = meet.x - 10 + (i - 1) * 26;
+      rival.y = meet.y - 70 - i * 85;
+      rival.angle = -Math.PI / 2;
+      rival.speed = 190;
+    });
+    return SCREEN.PLAY;
   }
 
-  // Unknown scene: just render the title.
-  G.state = 'title';
-  G.renderFrame();
-  window.__shotReady = true;
+  // chase (default): four stars at dusk, cruisers closing, helicopter up.
+  setSceneWeather(game, 19 * 60 + 5, 0);
+  const downtown = city.pois.gunshop;
+  const car = placePlayerInCar(game, 7, downtown.x - 160, downtown.y + 6, 0);
+  car.speed = 300;
+  game.wanted.heat = 4.2;
+  game.wanted.lastCrimeAt = game.time;
+  startMission(game); // objective line + marker on the HUD
+  seedCrowd(downtown.x, downtown.y, 8);
+  // Cruisers already on the player's tail, so the frame is a chase, not a queue.
+  for (const [dx, dy] of [[-210, -26], [-290, 24], [-390, -4]]) {
+    const cruiser = makeCar(game, 0, car.x + dx, car.y + dy, 0, {
+      police: true, kind: 'police',
+      ai: { stuck: 0, reverse: 0, roadblock: false },
+    });
+    cruiser.speed = 295;
+  }
+  return SCREEN.PLAY;
+}
+
+/** How long each scene simulates before the frame is frozen. */
+export function shotSeconds(name) {
+  if (name === 'chase') return 1.9;
+  if (name === 'mission') return 4.5;
+  if (name === 'onfoot') return 1.8;
+  return 2.5;
+}
+
+function driveToward(game, input, tx, ty) {
+  const car = game.player.inCar;
+  if (!car) return;
+  const want = Math.atan2(ty - car.y, tx - car.x);
+  const diff = angleDiff(car.angle, want);
+  input.pressedUp = true;
+  input.up = true;
+  input.left = diff < -0.06;
+  input.right = diff > 0.06;
+  input.handbrake = Math.abs(diff) > 1.9;
+}
+
+/** Fill a scripted input for one tick of a staged scene. */
+export function shotInput(game, name, input) {
+  const p = game.player;
+  if (name === 'onfoot') {
+    // Stroll west into the market streets, scattergun in hand.
+    input.left = true;
+    input.sprint = false;
+    p.aim = Math.PI + 0.3;
+    return;
+  }
+  if (name === 'mission' && game.side.race) {
+    const cp = game.side.race.checkpoints[game.side.race.next];
+    if (cp && p.inCar) {
+      const t = roadTargetToward(game, p.inCar.x, p.inCar.y, cp.x, cp.y);
+      driveToward(game, input, t.x, t.y);
+    }
+    return;
+  }
+  if (name === 'chase' && p.inCar) {
+    // Run for the pier along the streets, weaving gently so the cruisers
+    // have to work for their ram.
+    const car = p.inCar;
+    const pier = game.city.pois.marina;
+    const t = roadTargetToward(game, car.x, car.y, pier.x, pier.y);
+    const weave = Math.sin(game.time * 0.9) * 10;
+    driveToward(game, input, t.x + weave, t.y + weave);
+    return;
+  }
+  void clamp;
 }

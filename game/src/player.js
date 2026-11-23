@@ -1,135 +1,168 @@
-// Solmaris Heat — the player: on-foot movement with sprint stamina, driving,
-// entering and stealing cars, and getting shoved around by traffic.
-import { PLAYER } from './config.js';
+// Mara Voss, the player: walking, sprinting, stealing cars, driving them,
+// and using the city's services. Input arrives as a plain object from
+// input.js so the screenshot autopilot can drive the same code paths.
+
+import { driveCar, collideCarWithCity } from './vehicles.js';
 import { collideCircle } from './city.js';
-import { driveCarPhysics, carSpeed } from './vehicles.js';
+import { hurtPed } from './peds.js';
+import { clamp, dist2 } from './rng.js';
+import { feed } from './state.js';
 
-export function makePlayer(x, y) {
-  return {
-    x, y, vx: 0, vy: 0,
-    angle: -Math.PI / 2,
-    mode: 'foot',
-    car: null,
-    health: PLAYER.maxHealth,
-    armor: 0,
-    cash: 120,
-    weapon: 'fists',
-    ammo: 0,
-    stamina: 1,
-    walkPhase: 0,
-    shootCd: 0,
-    punchCd: 0,
-    dead: false,
-  };
-}
+const WALK = 118;
+const SPRINT = 196;
 
-export function updatePlayer(G, input, dt) {
-  const p = G.player;
+export function stepPlayerOnFoot(game, dt, input) {
+  const p = game.player;
   if (p.dead) return;
-  p.shootCd = Math.max(0, p.shootCd - dt);
-  p.punchCd = Math.max(0, p.punchCd - dt);
-
-  if (p.mode === 'car' && p.car) {
-    const car = p.car;
-    driveCarPhysics(G, car, {
-      throttle: input.up ? 1 : input.down ? -1 : 0,
-      steer: (input.right ? 1 : 0) - (input.left ? 1 : 0),
-      handbrake: input.handbrake,
-    }, dt);
-    p.x = car.x; p.y = car.y;
-    p.angle = car.angle;
-    p.vx = car.vx; p.vy = car.vy;
-    p.stamina = Math.min(1, p.stamina + PLAYER.staminaRegen * dt);
-    if (car.dead) exitCar(G);
-    return;
-  }
-
-  // On foot: screen-aligned movement, aim follows the mouse.
   let mx = (input.right ? 1 : 0) - (input.left ? 1 : 0);
-  let my = (input.down ? 1 : 0) - (input.up ? 1 : 0);
+  let my = (input.down ? 1 : 0) - (input.pressedUp ? 1 : 0);
   const len = Math.hypot(mx, my);
-  const sprinting = input.sprint && p.stamina > 0.02 && len > 0;
-  const speed = sprinting ? PLAYER.sprintSpeed : PLAYER.walkSpeed;
-  if (sprinting) p.stamina = Math.max(0, p.stamina - PLAYER.staminaDrain * dt);
-  else p.stamina = Math.min(1, p.stamina + PLAYER.staminaRegen * dt);
-  if (len > 0) {
-    mx /= len; my /= len;
-    p.vx = mx * speed; p.vy = my * speed;
-    p.walkPhase += dt * (sprinting ? 13 : 9);
-    if (!input.aiming) p.angle = Math.atan2(my, mx);
-  } else {
-    p.vx = 0; p.vy = 0;
-  }
-  if (input.aiming) {
-    const w = G.screenToWorld(input.mouseX, input.mouseY);
-    p.angle = Math.atan2(w.y - p.y, w.x - p.x);
-  }
+  if (len > 0) { mx /= len; my /= len; }
+
+  const sprinting = input.sprint && p.stamina > 0.05 && len > 0;
+  const speed = sprinting ? SPRINT : WALK;
+  if (sprinting) p.stamina = Math.max(0, p.stamina - dt * 0.32);
+  else p.stamina = Math.min(1, p.stamina + dt * 0.22);
+
+  p.vx = mx * speed;
+  p.vy = my * speed;
   p.x += p.vx * dt;
   p.y += p.vy * dt;
-  collideCircle(G.city, p, PLAYER.radius);
-
-  // Cars shove the player if they roll into them slowly; fast ones hurt.
-  for (const car of G.cars) {
-    const d = Math.hypot(car.x - p.x, car.y - p.y);
-    if (d < 30) {
-      const sp = carSpeed(car);
-      if (sp > 170) G.combat.damagePlayer(G, 22, 'run over');
-      const push = (30 - d) || 1;
-      const nx = (p.x - car.x) / (d || 1), ny = (p.y - car.y) / (d || 1);
-      p.x += nx * push; p.y += ny * push;
-    }
-  }
+  if (len > 0) p.angle = Math.atan2(my, mx);
+  collideCircle(game.city, p, p.r);
+  p.fireCd = Math.max(0, p.fireCd - dt);
+  p.hurtFlash = Math.max(0, p.hurtFlash - dt);
 }
 
-export function nearestCar(G, maxDist) {
-  const p = G.player;
-  let best = null, bestD = maxDist;
-  for (const car of G.cars) {
-    if (car.dead) continue;
-    const d = Math.hypot(car.x - p.x, car.y - p.y);
+/** The nearest car the player could get into, or null. */
+export function nearestEnterableCar(game) {
+  const p = game.player;
+  let best = null;
+  let bestD = 46 * 46;
+  for (const car of game.cars) {
+    if (car.dead || car.police) continue;
+    const d = dist2(p.x, p.y, car.x, car.y);
     if (d < bestD) { bestD = d; best = car; }
   }
   return best;
 }
 
-export function enterCar(G, car) {
-  const p = G.player;
-  const wasTraffic = car.driver === 'traffic';
-  const wasPolice = car.isPolice;
-  car.driver = 'player';
-  p.mode = 'car';
-  p.car = car;
-  p.x = car.x; p.y = car.y;
-  G.audio.door();
-  if (wasTraffic || car.stolen) {
-    G.stats.carsStolen++;
-    G.police.addCrime(G, 'stealCar');
-    G.hud.feed(`Stole a ${car.model.name}`);
-    if (wasTraffic) {
-      // The driver bails out and runs.
-      G.peds.push({
-        x: car.x + 16, y: car.y + 10, angle: 0, speed: 50, shirt: '#888', skin: '#d9a06b',
-        state: 'flee', timer: 2, health: 30, walkPhase: 0, targetX: 0, targetY: 0,
-      });
-    }
-  } else if (wasPolice) {
-    G.police.addCrime(G, 'stealCar');
-    G.hud.feed('You took a police cruiser!');
+export function enterCar(game, car) {
+  const p = game.player;
+  p.inCar = car;
+  if (car.kind === 'traffic' || car.kind === 'parked') {
+    game.stats.stolen += 1;
+    game.onCrime?.('steal-car');
+    feed(game, `You took the ${car.model.name}`);
   }
-  car.stolen = true;
-  G.missions.onEnterCar(car);
+  car.kind = 'player';
+  p.x = car.x;
+  p.y = car.y;
 }
 
-export function exitCar(G) {
-  const p = G.player;
-  if (!p.car) return;
-  const car = p.car;
-  car.driver = 'none';
-  car.vx *= 0.4; car.vy *= 0.4;
-  p.mode = 'foot';
-  p.car = null;
-  p.x = car.x + Math.cos(car.angle + Math.PI / 2) * 26;
-  p.y = car.y + Math.sin(car.angle + Math.PI / 2) * 26;
-  p.vx = 0; p.vy = 0;
-  G.audio.door();
+export function exitCar(game) {
+  const p = game.player;
+  const car = p.inCar;
+  if (!car) return;
+  const side = car.angle + Math.PI / 2;
+  p.x = car.x + Math.cos(side) * (car.model.wid / 2 + 14);
+  p.y = car.y + Math.sin(side) * (car.model.wid / 2 + 14);
+  p.vx = 0;
+  p.vy = 0;
+  collideCircle(game.city, p, p.r);
+  car.kind = 'parked';
+  p.inCar = null;
+}
+
+export function stepPlayerDriving(game, dt, input, gripMul) {
+  const p = game.player;
+  const car = p.inCar;
+  if (!car) return;
+  const throttle = (input.pressedUp ? 1 : 0) - (input.down ? 1 : 0);
+  const steer = (input.right ? 1 : 0) - (input.left ? 1 : 0);
+  driveCar(game, car, dt, { throttle, steer, handbrake: !!input.handbrake }, gripMul);
+  collideCarWithCity(game, car, dt);
+  p.x = car.x;
+  p.y = car.y;
+  p.angle = car.angle;
+  p.fireCd = Math.max(0, p.fireCd - dt);
+  p.hurtFlash = Math.max(0, p.hurtFlash - dt);
+
+  // Running people over is a crime, and the street notices.
+  if (Math.abs(car.speed) > 60) {
+    for (const ped of game.peds) {
+      if (ped.down) continue;
+      if (dist2(car.x, car.y, ped.x, ped.y) < 26 * 26) {
+        const killed = hurtPed(game, ped, 45 + Math.abs(car.speed) * 0.25);
+        game.onCrime?.(killed ? 'kill' : 'hit-ped');
+        car.speed *= 0.86;
+      }
+    }
+  }
+  // Shunting a cruiser counts too.
+  for (const other of game.cars) {
+    if (!other.police || other.dead) continue;
+    if (dist2(car.x, car.y, other.x, other.y) < 44 * 44 && Math.abs(car.speed) > 70 && game.time - (car.lastBumpAt || -9) > 2) {
+      car.lastBumpAt = game.time;
+      game.onCrime?.('hit-police-car');
+    }
+  }
+}
+
+/** The service the player is standing at (shop, respray, …), or null. */
+export function nearbyService(game) {
+  const p = game.player;
+  const px = p.inCar ? p.inCar.x : p.x;
+  const py = p.inCar ? p.inCar.y : p.y;
+  for (const poi of Object.values(game.city.pois)) {
+    if (dist2(px, py, poi.x, poi.y) < 52 * 52) return poi;
+  }
+  return null;
+}
+
+/** Small per-tick upkeep: skid marks, smoke, fire from damaged cars. */
+export function stepCarEffects(game, dt) {
+  for (const car of game.cars) {
+    const dmg = 1 - car.hp / car.maxHp;
+    if (car.burning > 0) {
+      car.burning -= dt;
+      if (game.rng() < 0.7) {
+        game.particles.push({
+          x: car.x + (game.rng() - 0.5) * 20, y: car.y + (game.rng() - 0.5) * 20,
+          vx: (game.rng() - 0.5) * 30, vy: -30 - game.rng() * 40,
+          life: 0.6, maxLife: 0.6, size: 7 + game.rng() * 8, kind: 'fire',
+        });
+      }
+      if (car.burning <= 0 && !car.exploded) {
+        car.exploded = true;
+        game.onExplode?.(car);
+      }
+    } else if (dmg > 0.55 && !car.dead && game.rng() < 0.3) {
+      game.particles.push({
+        x: car.x + Math.cos(car.angle) * car.model.len * 0.3,
+        y: car.y + Math.sin(car.angle) * car.model.len * 0.3,
+        vx: (game.rng() - 0.5) * 16, vy: -24 - game.rng() * 20,
+        life: 0.9, maxLife: 0.9, size: 6 + game.rng() * 6, kind: 'smoke',
+      });
+    }
+    // Skid marks while sliding.
+    const lat = Math.abs(-car.vx * Math.sin(car.angle) + car.vy * Math.cos(car.angle));
+    if (lat > 55 && Math.abs(car.speed) > 60) {
+      game.skids.push({ x: car.x, y: car.y, angle: car.angle, at: game.time });
+      if (game.skids.length > 900) game.skids.shift();
+    }
+  }
+  for (let i = game.particles.length - 1; i >= 0; i -= 1) {
+    const pt = game.particles[i];
+    pt.life -= dt;
+    pt.x += pt.vx * dt;
+    pt.y += pt.vy * dt;
+    if (pt.life <= 0) game.particles.splice(i, 1);
+  }
+}
+
+export function clampPlayerToWorld(game) {
+  const p = game.player;
+  p.hp = clamp(p.hp, 0, p.maxHp);
+  p.armor = clamp(p.armor, 0, p.maxArmor);
 }
